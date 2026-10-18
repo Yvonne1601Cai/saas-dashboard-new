@@ -1,0 +1,228 @@
+"use client";
+
+import { useId, useState, type FormEvent } from "react";
+import { useCreateProduct, useUpdateProduct } from "@/hooks/useProducts";
+import { api, ApiClientError } from "@/lib/api/client";
+import { centsToDollarString, dollarsToCents } from "@/lib/format";
+import {
+  MAX_DESCRIPTION_LENGTH,
+  PRODUCT_CATEGORIES,
+  PRODUCT_STATUSES,
+  productCreateSchema,
+  type Product,
+} from "@/lib/products/schema";
+import { Modal } from "./Modal";
+import { Button, Field, inputClass } from "./ui";
+
+interface FormState {
+  name: string;
+  category: string;
+  price: string; // dollars, as typed
+  status: string;
+  unitsSold: string;
+  description: string;
+}
+
+const EMPTY: FormState = { name: "", category: "Software", price: "", status: "active", unitsSold: "0", description: "" };
+
+function fromProduct(p: Product): FormState {
+  return {
+    name: p.name,
+    category: p.category,
+    price: centsToDollarString(p.priceCents),
+    status: p.status,
+    unitsSold: String(p.unitsSold),
+    description: p.description,
+  };
+}
+
+type Errors = Partial<Record<keyof FormState, string>>;
+
+/** Maps the API's field names (priceCents, ...) back to the form's field names. */
+const API_TO_FORM: Record<string, keyof FormState> = { priceCents: "price" };
+
+/** Turns the typed strings into the API payload, collecting per-field errors. */
+function validate(form: FormState) {
+  const errors: Errors = {};
+  const priceCents = dollarsToCents(form.price);
+  if (priceCents === null) errors.price = "Enter an amount like 19.99";
+  const unitsSold = /^\d+$/.test(form.unitsSold.trim()) ? Number(form.unitsSold) : null;
+  if (unitsSold === null) errors.unitsSold = "Enter a whole number, 0 or more";
+
+  const parsed = productCreateSchema.safeParse({
+    name: form.name,
+    category: form.category,
+    priceCents: priceCents ?? 0,
+    status: form.status,
+    unitsSold: unitsSold ?? 0,
+    description: form.description,
+  });
+  if (!parsed.success) {
+    for (const issue of parsed.error.issues) {
+      const key = API_TO_FORM[String(issue.path[0])] ?? (issue.path[0] as keyof FormState);
+      if (key in EMPTY && !errors[key]) errors[key] = issue.message;
+    }
+  }
+  return { errors, data: Object.keys(errors).length === 0 && parsed.success ? parsed.data : null };
+}
+
+export function ProductDialog({ product, onClose }: { product: Product | null; onClose: () => void }) {
+  const isEdit = product !== null;
+  const uid = useId();
+  const [form, setForm] = useState<FormState>(product ? fromProduct(product) : EMPTY);
+  const [errors, setErrors] = useState<Errors>({});
+  const [formError, setFormError] = useState<string | null>(null);
+  const [aiNote, setAiNote] = useState<string | null>(null);
+  const [aiPending, setAiPending] = useState(false);
+
+  const create = useCreateProduct();
+  const update = useUpdateProduct();
+  const saving = create.isPending || update.isPending;
+
+  const set = (key: keyof FormState) => (e: { target: { value: string } }) => {
+    setForm((f) => ({ ...f, [key]: e.target.value }));
+    setErrors((prev) => ({ ...prev, [key]: undefined }));
+  };
+
+  async function onSubmit(event: FormEvent) {
+    event.preventDefault();
+    setFormError(null);
+    const { errors: found, data } = validate(form);
+    setErrors(found);
+    if (!data) return;
+
+    try {
+      if (isEdit) await update.mutateAsync({ id: product.id, patch: data });
+      else await create.mutateAsync(data);
+      onClose();
+    } catch (error) {
+      if (error instanceof ApiClientError && error.issues.length > 0) {
+        // The server is the authority; show its field errors if the client missed any.
+        const next: Errors = {};
+        for (const issue of error.issues) {
+          const key = API_TO_FORM[issue.path] ?? (issue.path as keyof FormState);
+          if (key in EMPTY) next[key] = issue.message;
+        }
+        setErrors(next);
+      }
+      setFormError(error instanceof ApiClientError ? error.message : "Could not save the product.");
+    }
+  }
+
+  async function generateDescription() {
+    setAiNote(null);
+    setFormError(null);
+    const priceCents = dollarsToCents(form.price);
+    const missing: Errors = {};
+    if (!form.name.trim()) missing.name = "Enter a name first so the AI knows what to describe";
+    if (priceCents === null) missing.price = "Enter a price first";
+    if (Object.keys(missing).length > 0) {
+      setErrors((prev) => ({ ...prev, ...missing }));
+      return;
+    }
+    setAiPending(true);
+    try {
+      const result = await api<{ description: string; provider: string }>("/api/ai/description", {
+        method: "POST",
+        body: { name: form.name.trim(), category: form.category, priceCents },
+      });
+      setForm((f) => ({ ...f, description: result.description }));
+      setAiNote(
+        result.provider === "mock"
+          ? "Placeholder draft from the built-in mock (no GEMINI_API_KEY set). Review and edit before saving."
+          : "Draft generated by AI. Review and edit before saving.",
+      );
+    } catch (error) {
+      setAiNote(error instanceof ApiClientError ? `AI draft failed: ${error.message}` : "AI draft failed.");
+    } finally {
+      setAiPending(false);
+    }
+  }
+
+  return (
+    <Modal title={isEdit ? "Edit product" : "Add product"} onClose={onClose}>
+      <form onSubmit={onSubmit} noValidate className="space-y-4">
+        <Field id={`${uid}-name`} label="Name" error={errors.name}>
+          {(aria) => (
+            <input {...aria} value={form.name} onChange={set("name")} maxLength={120} required className={inputClass} />
+          )}
+        </Field>
+
+        <div className="grid grid-cols-2 gap-4">
+          <Field id={`${uid}-category`} label="Category" error={errors.category}>
+            {(aria) => (
+              <select {...aria} value={form.category} onChange={set("category")} className={inputClass}>
+                {PRODUCT_CATEGORIES.map((c) => (
+                  <option key={c}>{c}</option>
+                ))}
+              </select>
+            )}
+          </Field>
+          <Field id={`${uid}-status`} label="Status" error={errors.status}>
+            {(aria) => (
+              <select {...aria} value={form.status} onChange={set("status")} className={inputClass}>
+                {PRODUCT_STATUSES.map((s) => (
+                  <option key={s} value={s}>
+                    {s[0].toUpperCase() + s.slice(1)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </Field>
+          <Field id={`${uid}-price`} label="Price (USD)" error={errors.price}>
+            {(aria) => (
+              <input {...aria} value={form.price} onChange={set("price")} inputMode="decimal" placeholder="19.99" className={inputClass} />
+            )}
+          </Field>
+          <Field id={`${uid}-units`} label="Units sold" error={errors.unitsSold}>
+            {(aria) => (
+              <input {...aria} value={form.unitsSold} onChange={set("unitsSold")} inputMode="numeric" className={inputClass} />
+            )}
+          </Field>
+        </div>
+
+        <div>
+          <Field
+            id={`${uid}-description`}
+            label="Description"
+            error={errors.description}
+            hint={`${form.description.length}/${MAX_DESCRIPTION_LENGTH}`}
+          >
+            {(aria) => (
+              <textarea
+                {...aria}
+                value={form.description}
+                onChange={set("description")}
+                rows={4}
+                maxLength={MAX_DESCRIPTION_LENGTH}
+                className={inputClass}
+              />
+            )}
+          </Field>
+          <div className="mt-2 flex items-center gap-3">
+            <Button variant="secondary" onClick={generateDescription} disabled={aiPending || saving}>
+              {aiPending ? "Generating…" : "Generate with AI"}
+            </Button>
+            {/* Live region: the result or failure is announced without moving focus. */}
+            <p role="status" className="text-sm text-slate-600">
+              {aiNote}
+            </p>
+          </div>
+        </div>
+
+        <div role="alert" className="min-h-5 text-sm text-red-600">
+          {formError}
+        </div>
+
+        <div className="flex justify-end gap-3">
+          <Button variant="secondary" onClick={onClose} disabled={saving}>
+            Cancel
+          </Button>
+          <Button type="submit" disabled={saving}>
+            {saving ? "Saving…" : isEdit ? "Save changes" : "Create product"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}

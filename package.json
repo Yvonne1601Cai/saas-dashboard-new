@@ -2,25 +2,44 @@
   "name": "saas-dashboard",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --exclude \"tests/integration/**\" --exclude \"tests/e2e/**\"",
+    "test:integration": "firebase emulators:exec --only auth,firestore \"vitest run tests/integration\"",
+    "test:e2e": "vitest run tests/e2e",
+    "emulators": "firebase emulators:start --only auth,firestore",
+    "seed": "node --env-file-if-exists=.env.local --conditions=react-server scripts/seed.ts",
+    "set-role": "node --env-file-if-exists=.env.local --conditions=react-server scripts/set-role.ts",
+    "indexes:generate": "node scripts/generate-indexes.ts"
   },
   "dependencies": {
+    "@tanstack/react-query": "^5.104.4",
+    "firebase": "^13.0.0",
+    "firebase-admin": "^14.5.0",
     "next": "16.4.2",
     "react": "19.3.0",
-    "react-dom": "19.3.0"
+    "react-dom": "19.3.0",
+    "server-only": "^0.0.1",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@tailwindcss/turbopack": "^4",
-    "@types/node": "^20",
+    "@types/node": "^24.19.2",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
     "eslint-config-next": "16.4.2",
+    "firebase-tools": "^15.34.0",
     "tailwindcss": "^4",
-    "typescript": "^5"
+    "typescript": "^5",
+    "vitest": "^5.0.5"
+  },
+  "engines": {
+    "node": ">=22.18"
   }
 }
