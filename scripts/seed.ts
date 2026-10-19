@@ -1,11 +1,11 @@
-// Creates two demo users and ~60 demo products in the Firebase EMULATORS.
+// Creates two demo users and ~60 demo products, with sales, in the Firebase EMULATORS.
 //   npm run seed            (skips if products already exist)
-//   npm run seed -- --reset (wipes products first)
+//   npm run seed -- --reset (wipes products and sales first)
 //
 // Refuses to run against anything but the emulators: it creates accounts with a
 // published password.
 import { adminAuth, db } from "../src/lib/firebase/admin.ts";
-import { createProduct, getMetrics } from "../src/lib/products/repository.ts";
+import { createProduct, getMetrics, recordSale } from "../src/lib/products/repository.ts";
 import { setUserRole } from "../src/lib/users/repository.ts";
 import { PRODUCT_CATEGORIES, type ProductCreateInput } from "../src/lib/products/schema.ts";
 
@@ -44,18 +44,31 @@ function mulberry32(seed: number) {
 }
 
 const NAMES: Record<(typeof PRODUCT_CATEGORIES)[number], string[]> = {
-  Software: ["Insight Analytics", "TaskFlow", "CodeLens", "FormBuilder", "DataSync", "ChatDesk"],
-  Hardware: ["Smart Badge Reader", "Desk Hub", "Sensor Kit", "Edge Gateway", "Label Printer"],
-  Services: ["Onboarding Package", "Security Audit", "Migration Service", "Premium Support"],
-  Subscriptions: ["Team Plan", "Business Plan", "Enterprise Plan", "Starter Plan", "Pro Plan"],
-  Other: ["Gift Card", "Training Voucher", "Sticker Pack"],
+  Bread: ["Sourdough Loaf", "Baguette", "Ciabatta", "Multigrain Loaf", "Rye Loaf", "Brioche Loaf", "Focaccia", "Challah"],
+  Pastries: ["Butter Croissant", "Pain au Chocolat", "Cinnamon Roll", "Almond Danish", "Apple Turnover", "Cheese Danish", "Eclair"],
+  Cakes: ["Chocolate Fudge Cake", "Carrot Cake", "Lemon Drizzle Cake", "Red Velvet Cake", "Cheesecake", "Black Forest Cake"],
+  Cookies: ["Chocolate Chip Cookie", "Oatmeal Raisin Cookie", "Shortbread", "Macarons", "Snickerdoodle", "Ginger Snap"],
+  Drinks: ["Flat White", "Cold Brew", "Chai Latte", "Hot Chocolate", "Fresh Orange Juice"],
+  Other: ["Gift Box", "Baking Class Voucher", "Tote Bag"],
+};
+
+// Realistic whole-dollar price range per category, so a cake is not cheaper than a coffee.
+const PRICE_DOLLARS: Record<(typeof PRODUCT_CATEGORIES)[number], [number, number]> = {
+  Bread: [4, 9],
+  Pastries: [3, 7],
+  Cakes: [18, 65],
+  Cookies: [2, 12],
+  Drinks: [3, 8],
+  Other: [10, 60],
 };
 
 async function main() {
   const [admin] = await Promise.all(DEMO_USERS.map((u) => ensureUser(u.email, u.role)));
   console.log(`Users ready: ${DEMO_USERS.map((u) => `${u.email} (${u.role})`).join(", ")}  password: ${PASSWORD}`);
 
-  if (process.argv.includes("--reset")) await db.recursiveDelete(db.collection("products"));
+  if (process.argv.includes("--reset")) {
+    await Promise.all([db.recursiveDelete(db.collection("products")), db.recursiveDelete(db.collection("sales"))]);
+  }
   if ((await getMetrics()).totalProducts > 0) {
     console.log("Products already exist; skipping (use --reset to recreate).");
     return;
@@ -64,23 +77,32 @@ async function main() {
   const rand = mulberry32(42);
   const pick = <T>(items: readonly T[]) => items[Math.floor(rand() * items.length)];
   const day = 24 * 60 * 60 * 1000;
-  const editions = ["", " Lite", " Plus", " Max", " 2.0", " Cloud"];
+  const editions = ["", " (Mini)", " (Large)", " Family Pack", " Gluten-Free", " Vegan"];
 
   const total = 60;
   for (let i = 0; i < total; i++) {
     const category = pick(PRODUCT_CATEGORIES);
+    const [minDollars, maxDollars] = PRICE_DOLLARS[category];
+    const edition = pick(editions);
     const product: ProductCreateInput = {
-      name: `${pick(NAMES[category])}${pick(editions)}`,
+      name: `${pick(NAMES[category])}${category === "Other" ? "" : edition}`,
       category,
-      priceCents: (Math.floor(rand() * 400) + 5) * 100 - (rand() < 0.5 ? 1 : 0),
+      priceCents: (minDollars + Math.floor(rand() * (maxDollars - minDollars + 1))) * 100 - (rand() < 0.5 ? 1 : 0),
       status: rand() < 0.75 ? "active" : "inactive",
-      unitsSold: Math.floor(rand() * 500),
       description: "",
     };
     // Spread creation dates over the last ~90 days, oldest first.
-    await createProduct(product, admin.uid, { createdAt: new Date(Date.now() - (total - i) * 1.5 * day) });
+    const createdAt = Date.now() - (total - i) * 1.5 * day;
+    const { id } = await createProduct(product, admin.uid, { createdAt: new Date(createdAt) });
+
+    // Up to three sales, in date order, between creation and now.
+    const saleCount = Math.floor(rand() * 4);
+    const saleTimes = Array.from({ length: saleCount }, () => createdAt + rand() * (Date.now() - createdAt)).sort((a, b) => a - b);
+    for (const time of saleTimes) {
+      await recordSale(id, { quantity: 1 + Math.floor(rand() * 150) }, admin.uid, { createdAt: new Date(time) });
+    }
   }
-  console.log(`Created ${total} products.`);
+  console.log(`Created ${total} products with sales.`);
 }
 
 main().then(

@@ -5,7 +5,7 @@ import { useState } from "react";
 import { api, ApiClientError } from "@/lib/api/client";
 import { ROLES, type Role } from "@/lib/auth/roles";
 import type { AdminUserView } from "@/lib/users/repository";
-import { Badge, inputClass } from "./ui";
+import { Badge, selectClass } from "./ui";
 
 const dateFormat = new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" });
 
@@ -62,6 +62,7 @@ export function UsersAdmin({ currentUid }: { currentUid: string }) {
                   <tr key={user.uid}>
                     <th scope="row" className="px-3 py-3 text-left text-sm font-medium text-slate-900">
                       {user.email} {isSelf && <Badge tone="amber">you</Badge>}{" "}
+                      {!user.emailVerified && <Badge tone="gray">unverified</Badge>}{" "}
                       {user.disabled && <Badge tone="gray">disabled</Badge>}
                     </th>
                     <td className="px-3 py-3">
@@ -74,7 +75,7 @@ export function UsersAdmin({ currentUid }: { currentUid: string }) {
                         // You cannot change your own role: avoids locking the last admin out.
                         disabled={isSelf || changeRole.isPending}
                         onChange={(e) => changeRole.mutate({ uid: user.uid, role: e.target.value as Role })}
-                        className={`${inputClass} w-32`}
+                        className={`${selectClass} w-32`}
                       >
                         {ROLES.map((r) => (
                           <option key={r} value={r}>

@@ -10,6 +10,7 @@ import { MetricCards } from "./MetricCards";
 import { ProductDialog } from "./ProductDialog";
 import { ProductFilters } from "./ProductFilters";
 import { ProductTable } from "./ProductTable";
+import { RecordSaleDialog } from "./RecordSaleDialog";
 import { Button } from "./ui";
 
 // First click on a column picks the direction people usually want for it.
@@ -36,6 +37,7 @@ export function Dashboard({ role }: { role: Role }) {
   const items = products.data?.pages.flatMap((page) => page.items) ?? [];
 
   const [editing, setEditing] = useState<Product | "new" | null>(null);
+  const [selling, setSelling] = useState<Product | null>(null);
   const [deleting, setDeleting] = useState<Product | null>(null);
 
   function onSort(key: SortKey) {
@@ -102,6 +104,7 @@ export function Dashboard({ role }: { role: Role }) {
               canWrite={canWrite}
               onSort={onSort}
               onEdit={setEditing}
+              onRecordSale={setSelling}
               onDelete={setDeleting}
             />
             <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
@@ -128,6 +131,7 @@ export function Dashboard({ role }: { role: Role }) {
       {canWrite && editing && (
         <ProductDialog product={editing === "new" ? null : editing} onClose={() => setEditing(null)} />
       )}
+      {canWrite && selling && <RecordSaleDialog product={selling} onClose={() => setSelling(null)} />}
       {canWrite && deleting && <DeleteDialog product={deleting} onClose={() => setDeleting(null)} />}
     </div>
   );

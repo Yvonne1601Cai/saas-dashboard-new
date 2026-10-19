@@ -13,6 +13,7 @@ interface Props {
   canWrite: boolean;
   onSort: (key: SortKey) => void;
   onEdit: (product: Product) => void;
+  onRecordSale: (product: Product) => void;
   onDelete: (product: Product) => void;
 }
 
@@ -60,7 +61,7 @@ function SortableHeader({
   );
 }
 
-export function ProductTable({ items, sort, dir, sortLocked, canWrite, onSort, onEdit, onDelete }: Props) {
+export function ProductTable({ items, sort, dir, sortLocked, canWrite, onSort, onEdit, onRecordSale, onDelete }: Props) {
   const header = (label: string, key: SortKey, extra?: { className?: string; align?: "left" | "right" }) => (
     <SortableHeader
       label={label}
@@ -133,6 +134,9 @@ export function ProductTable({ items, sort, dir, sortLocked, canWrite, onSort, o
                   <div className="flex justify-end gap-2">
                     <Button variant="secondary" onClick={() => onEdit(product)} aria-label={`Edit ${product.name}`}>
                       Edit
+                    </Button>
+                    <Button variant="secondary" onClick={() => onRecordSale(product)} aria-label={`Add units sold for ${product.name}`}>
+                      Add units sold
                     </Button>
                     <Button variant="danger" onClick={() => onDelete(product)} aria-label={`Delete ${product.name}`}>
                       Delete

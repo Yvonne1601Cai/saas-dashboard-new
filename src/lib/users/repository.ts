@@ -10,6 +10,7 @@ export interface AdminUserView {
   uid: string;
   email: string;
   role: Role;
+  emailVerified: boolean;
   disabled: boolean;
   createdAt: string;
   lastSignInAt: string | null;
@@ -23,6 +24,7 @@ export async function listUsers(): Promise<AdminUserView[]> {
     uid: u.uid,
     email: u.email ?? "(no email)",
     role: parseRole(u.customClaims?.role),
+    emailVerified: u.emailVerified,
     disabled: u.disabled,
     createdAt: new Date(u.metadata.creationTime).toISOString(),
     lastSignInAt: u.metadata.lastSignInTime ? new Date(u.metadata.lastSignInTime).toISOString() : null,

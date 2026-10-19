@@ -51,11 +51,11 @@ describe("prompt construction", () => {
 
 describe("MockProvider", () => {
   it("is deterministic and mentions the product", async () => {
-    const input = { name: "Acme CRM", category: "Software", priceCents: 4900 };
+    const input = { name: "Sourdough Loaf", category: "Bread", priceCents: 4900 };
     const a = await new MockProvider().generate(input);
     const b = await new MockProvider().generate(input);
     expect(a).toBe(b);
-    expect(a).toContain("Acme CRM");
+    expect(a).toContain("Sourdough Loaf");
     expect(a).toContain("$49.00");
   });
 });

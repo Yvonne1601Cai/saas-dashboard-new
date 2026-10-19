@@ -18,28 +18,28 @@ import {
   type OrderField,
 } from "./cursor.ts";
 import { planListQuery } from "./queryPlan.ts";
-import type {
-  Metrics,
-  Product,
-  ProductCreateInput,
-  ProductListParams,
-  ProductPage,
-  ProductUpdateInput,
+import {
+  MAX_UNITS_SOLD,
+  type Metrics,
+  type Product,
+  type ProductCreateInput,
+  type ProductListParams,
+  type ProductPage,
+  type ProductUpdateInput,
+  type Sale,
+  type SaleCreateInput,
 } from "./schema.ts";
 
-const COLLECTION = "products";
-const products = () => db.collection(COLLECTION);
+const products = () => db.collection("products");
+// Top-level rather than a subcollection of the product, so a sale (and the
+// revenue it represents) outlives a hard-deleted product.
+const sales = () => db.collection("sales");
 
-/** Fields that are derived on every write, never accepted from a client. */
-function derivedFields(name: string, priceCents: number, unitsSold: number) {
-  return {
-    // Lower-cased copy: Firestore has no case-insensitive search or sort, so
-    // search (prefix match) and "sort by name" both run against this field.
-    nameLower: name.toLowerCase(),
-    // Denormalised so the revenue metric is a server-side sum() aggregation
-    // (one index scan) instead of reading every product into memory.
-    revenueCents: priceCents * unitsSold,
-  };
+/** Derived from the name on every write, never accepted from a client. */
+function nameFields(name: string) {
+  // Lower-cased copy: Firestore has no case-insensitive search or sort, so
+  // search (prefix match) and "sort by name" both run against this field.
+  return { nameLower: name.toLowerCase() };
 }
 
 function toProduct(id: string, data: DocumentData): Product {
@@ -135,7 +135,9 @@ export async function createProduct(
   const now = options.createdAt ? Timestamp.fromDate(options.createdAt) : Timestamp.now();
   const data = {
     ...input,
-    ...derivedFields(input.name, input.priceCents, input.unitsSold),
+    ...nameFields(input.name),
+    unitsSold: 0,
+    revenueCents: 0,
     createdAt: now,
     updatedAt: now,
     createdBy: actorUid,
@@ -145,7 +147,11 @@ export async function createProduct(
   return toProduct(ref.id, data);
 }
 
-/** Partial update. Runs in a transaction because revenueCents depends on the stored price and units. */
+/**
+ * Partial update. A price change applies to future sales only: unitsSold and
+ * revenueCents are not editable here. Runs in a transaction so the returned
+ * product is exactly what is stored, even if a sale is recorded concurrently.
+ */
 export async function updateProduct(
   id: string,
   patch: ProductUpdateInput,
@@ -157,12 +163,9 @@ export async function updateProduct(
     if (!snap.exists) return null;
     const current = snap.data()!;
 
-    const name = patch.name ?? current.name;
-    const priceCents = patch.priceCents ?? current.priceCents;
-    const unitsSold = patch.unitsSold ?? current.unitsSold;
     const update = {
       ...patch,
-      ...derivedFields(name, priceCents, unitsSold),
+      ...(patch.name === undefined ? {} : nameFields(patch.name)),
       updatedAt: Timestamp.now(),
       updatedBy: actorUid,
     };
@@ -171,7 +174,62 @@ export async function updateProduct(
   });
 }
 
-/** Hard delete. Returns false if the product did not exist. */
+/**
+ * Records a sale at the product's current price and adds it to the product's
+ * running totals. One transaction, so concurrent sales are never lost and the
+ * totals always equal the sum of the product's sales.
+ */
+export async function recordSale(
+  productId: string,
+  input: SaleCreateInput,
+  actorUid: string,
+  // Only the seed script passes this, like createProduct.
+  options: { createdAt?: Date } = {},
+): Promise<{ sale: Sale; product: Product } | null> {
+  const productRef = products().doc(productId);
+  const saleRef = sales().doc();
+  return db.runTransaction(async (tx) => {
+    const snap = await tx.get(productRef);
+    if (!snap.exists) return null;
+    const current = snap.data()!;
+
+    const unitsSold = current.unitsSold + input.quantity;
+    if (unitsSold > MAX_UNITS_SOLD) {
+      throw new ApiError("bad_request", `A product cannot exceed ${MAX_UNITS_SOLD.toLocaleString("en-US")} units sold`);
+    }
+    const now = options.createdAt ? Timestamp.fromDate(options.createdAt) : Timestamp.now();
+    const amountCents = input.quantity * current.priceCents;
+    const saleData = {
+      productId,
+      quantity: input.quantity,
+      unitPriceCents: current.priceCents,
+      amountCents,
+      createdAt: now,
+      createdBy: actorUid,
+    };
+    const update = {
+      unitsSold,
+      revenueCents: current.revenueCents + amountCents,
+      updatedAt: now,
+      updatedBy: actorUid,
+    };
+    tx.create(saleRef, saleData);
+    tx.update(productRef, update);
+    return {
+      sale: {
+        id: saleRef.id,
+        productId,
+        quantity: saleData.quantity,
+        unitPriceCents: saleData.unitPriceCents,
+        amountCents,
+        createdAt: now.toDate().toISOString(),
+      },
+      product: toProduct(productId, { ...current, ...update }),
+    };
+  });
+}
+
+/** Hard delete. Returns false if the product did not exist. Its sales are kept, so revenue is not restated. */
 export async function deleteProduct(id: string): Promise<boolean> {
   const ref = products().doc(id);
   return db.runTransaction(async (tx) => {
@@ -186,23 +244,26 @@ export async function deleteProduct(id: string): Promise<boolean> {
  * Dashboard metrics via Firestore aggregation queries: the work happens inside
  * Firestore and we are billed per 1,000 index entries scanned, not per document
  * read, so this stays fast and cheap as the collection grows.
+ *
+ * Revenue is summed from the sales, not the products, so it includes sales of
+ * products that were deleted since.
  */
 export async function getMetrics(): Promise<Metrics> {
-  const [all, active] = await Promise.all([
+  const [all, active, revenue] = await Promise.all([
     products()
       .aggregate({
         total: AggregateField.count(),
-        revenue: AggregateField.sum("revenueCents"),
         averagePrice: AggregateField.average("priceCents"),
       })
       .get(),
     products().where("status", "==", "active").count().get(),
+    sales().aggregate({ total: AggregateField.sum("amountCents") }).get(),
   ]);
   const totals = all.data();
   return {
     totalProducts: totals.total,
     activeProducts: active.data().count,
-    revenueCents: totals.revenue,
+    revenueCents: revenue.data().total,
     averagePriceCents: totals.averagePrice === null ? null : Math.round(totals.averagePrice),
   };
 }

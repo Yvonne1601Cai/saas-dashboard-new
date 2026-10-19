@@ -290,6 +290,11 @@
     },
     {
       "collectionGroup": "products",
+      "fieldPath": "revenueCents",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "products",
       "fieldPath": "updatedAt",
       "indexes": []
     },
@@ -301,6 +306,21 @@
     {
       "collectionGroup": "products",
       "fieldPath": "updatedBy",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sales",
+      "fieldPath": "quantity",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sales",
+      "fieldPath": "unitPriceCents",
+      "indexes": []
+    },
+    {
+      "collectionGroup": "sales",
+      "fieldPath": "createdBy",
       "indexes": []
     }
   ]

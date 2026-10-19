@@ -7,6 +7,7 @@ import {
   getMetrics,
   getProduct,
   listProducts,
+  recordSale,
   updateProduct,
 } from "../../src/lib/products/repository.ts";
 import {
@@ -27,14 +28,15 @@ async function clearFirestore() {
 }
 
 const input = (over: Partial<ProductCreateInput> = {}): ProductCreateInput => ({
-  name: "Widget",
-  category: "Hardware",
+  name: "Baguette",
+  category: "Cakes",
   priceCents: 1000,
   status: "active",
-  unitsSold: 2,
   description: "",
   ...over,
 });
+
+const sell = (id: string, quantity: number) => recordSale(id, { quantity }, ACTOR);
 
 const list = (query: Record<string, string> = {}) =>
   listProducts(productListQuerySchema.parse(query));
@@ -54,18 +56,19 @@ async function walk(query: Record<string, string>) {
 beforeEach(clearFirestore);
 
 describe("create / read / update / delete", () => {
-  it("stores derived fields and returns a clean DTO", async () => {
-    const created = await createProduct(input({ name: "Acme Pro", priceCents: 2500, unitsSold: 4 }), ACTOR);
-    expect(created).toMatchObject({ name: "Acme Pro", priceCents: 2500, unitsSold: 4, revenueCents: 10_000 });
+  it("starts with no sales and returns a clean DTO", async () => {
+    const created = await createProduct(input({ name: "Rye Loaf", priceCents: 2500 }), ACTOR);
+    expect(created).toMatchObject({ name: "Rye Loaf", priceCents: 2500, unitsSold: 0, revenueCents: 0 });
     expect(created).not.toHaveProperty("nameLower");
     expect(created).not.toHaveProperty("createdBy");
     expect(await getProduct(created.id)).toEqual(created);
   });
 
-  it("recomputes revenue on a partial update and keeps untouched fields", async () => {
-    const { id } = await createProduct(input({ priceCents: 1000, unitsSold: 3, description: "keep me" }), ACTOR);
+  it("keeps untouched fields on a partial update", async () => {
+    const { id } = await createProduct(input({ priceCents: 1000, description: "keep me" }), ACTOR);
     const updated = await updateProduct(id, { priceCents: 2000 }, ACTOR);
-    expect(updated).toMatchObject({ priceCents: 2000, unitsSold: 3, revenueCents: 6000, description: "keep me" });
+    expect(updated).toMatchObject({ priceCents: 2000, description: "keep me" });
+    expect(await getProduct(id)).toEqual(updated);
     expect(new Date(updated!.updatedAt).getTime()).toBeGreaterThanOrEqual(new Date(updated!.createdAt).getTime());
   });
 
@@ -79,6 +82,7 @@ describe("create / read / update / delete", () => {
   it("returns null/false for missing products", async () => {
     expect(await getProduct("doesnotexist")).toBeNull();
     expect(await updateProduct("doesnotexist", { name: "x" }, ACTOR)).toBeNull();
+    expect(await sell("doesnotexist", 1)).toBeNull();
     expect(await deleteProduct("doesnotexist")).toBe(false);
   });
 
@@ -86,6 +90,40 @@ describe("create / read / update / delete", () => {
     const { id } = await createProduct(input(), ACTOR);
     expect(await deleteProduct(id)).toBe(true);
     expect(await getProduct(id)).toBeNull();
+  });
+});
+
+describe("sales", () => {
+  it("records a sale at the current price and adds it to the product's totals", async () => {
+    const { id } = await createProduct(input({ priceCents: 1000 }), ACTOR);
+    const result = await sell(id, 3);
+    expect(result!.sale).toMatchObject({ productId: id, quantity: 3, unitPriceCents: 1000, amountCents: 3000 });
+    expect(result!.product).toMatchObject({ unitsSold: 3, revenueCents: 3000 });
+    expect(await getProduct(id)).toEqual(result!.product);
+  });
+
+  it("does not restate past revenue when the price changes", async () => {
+    const { id } = await createProduct(input({ priceCents: 1000 }), ACTOR);
+    await sell(id, 100); // 100 x $10
+    const repriced = await updateProduct(id, { priceCents: 1500 }, ACTOR);
+    expect(repriced).toMatchObject({ unitsSold: 100, revenueCents: 100_000 });
+    await sell(id, 10); // 10 x $15
+    expect(await getProduct(id)).toMatchObject({ unitsSold: 110, revenueCents: 115_000 });
+  });
+
+  // The emulator resolves contended transactions through lock timeouts and
+  // retries, so five sales on one document take several seconds there.
+  it("never loses a concurrent sale", { timeout: 30_000 }, async () => {
+    const { id } = await createProduct(input({ priceCents: 500 }), ACTOR);
+    await Promise.all(Array.from({ length: 5 }, () => sell(id, 2)));
+    expect(await getProduct(id)).toMatchObject({ unitsSold: 10, revenueCents: 5000 });
+  });
+
+  it("rejects a sale that would exceed the units cap", async () => {
+    const { id } = await createProduct(input(), ACTOR);
+    await sell(id, 10_000_000);
+    await expect(sell(id, 1)).rejects.toBeInstanceOf(ApiError);
+    expect(await getProduct(id)).toMatchObject({ unitsSold: 10_000_000 });
   });
 });
 
@@ -98,7 +136,7 @@ describe("listing", () => {
         input({
           name: `${names[i % names.length]} ${i}`,
           priceCents: ((i % 5) + 1) * 500, // only 5 distinct prices -> many ties
-          category: i % 2 === 0 ? "Software" : "Hardware",
+          category: i % 2 === 0 ? "Bread" : "Cakes",
           status: i % 3 === 0 ? "inactive" : "active",
         }),
         ACTOR,
@@ -139,10 +177,10 @@ describe("listing", () => {
 
   it("filters by status and category, combined with paging", async () => {
     await seed();
-    const pages = await walk({ status: "active", category: "Software", limit: "3", sort: "price", dir: "asc" });
+    const pages = await walk({ status: "active", category: "Bread", limit: "3", sort: "price", dir: "asc" });
     const all = pages.flat();
     expect(all.length).toBeGreaterThan(3); // really spans several pages
-    expect(all.every((p) => p.status === "active" && p.category === "Software")).toBe(true);
+    expect(all.every((p) => p.status === "active" && p.category === "Bread")).toBe(true);
   });
 
   it("searches by case-insensitive name prefix, sorted by name", async () => {
@@ -172,14 +210,24 @@ describe("metrics", () => {
   });
 
   it("aggregates inside Firestore", async () => {
-    await createProduct(input({ priceCents: 1000, unitsSold: 2, status: "active" }), ACTOR); // 2000
-    await createProduct(input({ priceCents: 3000, unitsSold: 1, status: "inactive" }), ACTOR); // 3000
-    await createProduct(input({ priceCents: 500, unitsSold: 10, status: "active" }), ACTOR); // 5000
+    const a = await createProduct(input({ priceCents: 1000, status: "active" }), ACTOR);
+    const b = await createProduct(input({ priceCents: 3000, status: "inactive" }), ACTOR);
+    const c = await createProduct(input({ priceCents: 500, status: "active" }), ACTOR);
+    await sell(a.id, 2); // 2000
+    await sell(b.id, 1); // 3000
+    await sell(c.id, 10); // 5000
     expect(await getMetrics()).toEqual({
       totalProducts: 3,
       activeProducts: 2,
       revenueCents: 10_000,
       averagePriceCents: 1500,
     });
+  });
+
+  it("keeps the revenue of a deleted product", async () => {
+    const { id } = await createProduct(input({ priceCents: 1000 }), ACTOR);
+    await sell(id, 4);
+    await deleteProduct(id);
+    expect(await getMetrics()).toMatchObject({ totalProducts: 0, revenueCents: 4000 });
   });
 });

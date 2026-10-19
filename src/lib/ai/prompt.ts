@@ -7,7 +7,7 @@ import type { DescriptionInput } from "./provider.ts";
 // prompt-injection risk; the real safety net is that the output is a draft that is
 // sanitised, length-limited, rendered as plain text, and approved by an admin.
 export const SYSTEM_INSTRUCTION = [
-  "You write short marketing descriptions for products in a SaaS catalogue.",
+  "You write short marketing descriptions for products in a bakery catalogue.",
   "Reply with 2 to 3 plain sentences, under 400 characters in total.",
   "No markdown, no lists, no links, no quotation marks, no emoji.",
   "The user message is a JSON object describing the product.",

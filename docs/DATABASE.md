@@ -1,8 +1,51 @@
 # Database design
 
-Firestore holds one collection, `products`. Users and roles live in **Firebase Auth**, not in Firestore (see [Where users live](#where-users-live)).
+Firestore holds two collections, `products` and `sales`. Users and roles live in **Firebase Auth**, not in Firestore (see [Where users live](#where-users-live)).
 
 All access goes through the Next.js API using the Admin SDK. `firestore.rules` denies every direct client read and write, so the data model is only reachable through code that checks the session and role first.
+
+## At a glance
+
+```
+(Firestore root)
+├── products/{productId}     one document per product, including running sales totals
+└── sales/{saleId}           one document per recorded sale; productId points back to the product
+
+(Firebase Auth)
+└── users                    identity + role custom claim { role: "admin" }; no Firestore copy
+```
+
+**Subcollections: none, deliberately.**
+
+- **Sales are a top-level collection, not `products/{id}/sales`.** A product can be hard-deleted, and a subcollection is not deleted with its parent but becomes orphaned and awkward to query. A top-level collection keeps every sale reachable after the product is gone. It also lets the revenue metric be one `sum(amountCents)` over `sales`, rather than a collection-group query.
+- **Users are not in Firestore at all** (see [Where users live](#where-users-live)).
+- Subcollections do appear in the [multi-tenancy plan](#multi-tenancy), where nesting under `orgs/{orgId}` gives tenant isolation by construction.
+
+An example `products` document, as stored:
+
+```json
+{
+  "name": "Sourdough Loaf",
+  "nameLower": "sourdough loaf",
+  "category": "Bread",
+  "priceCents": 650,
+  "status": "active",
+  "description": "",
+  "unitsSold": 12,
+  "revenueCents": 7800,
+  "createdAt": "<Timestamp>",
+  "updatedAt": "<Timestamp>",
+  "createdBy": "<uid>",
+  "updatedBy": "<uid>"
+}
+```
+
+| The brief asks for | Where it is answered |
+|---|---|
+| Collections, documents, fields, subcollections | This section, [`products`](#productsproductid), [`sales`](#salessaleid), [Where users live](#where-users-live) |
+| Indexing strategy | [Queries and indexes](#queries-and-indexes) |
+| Multi-tenancy | [Multi-tenancy](#multi-tenancy) |
+| 10× the number of products | [Scaling to 10x and beyond](#scaling-to-10x-and-beyond) |
 
 ## `products/{productId}`
 
@@ -11,20 +54,37 @@ The document id is a Firestore auto-id (20 alphanumeric characters).
 | Field | Type | Set by | Notes |
 |---|---|---|---|
 | `name` | string (1-120) | client | Display name. |
-| `category` | string enum | client | `Software`, `Hardware`, `Services`, `Subscriptions`, `Other`. |
+| `category` | string enum | client | `Bread`, `Pastries`, `Cakes`, `Cookies`, `Drinks`, `Other`. |
 | `priceCents` | integer (0 to 10,000,000) | client | **Integer cents**, never a float, so sums are exact. |
 | `status` | `"active"` \| `"inactive"` | client | |
-| `unitsSold` | integer (0 to 10,000,000) | client | Needed to give "revenue" a meaning. |
 | `description` | string (0-1000) | client / AI draft | Optional. |
 | `nameLower` | string | **server** | `name.toLowerCase()`. Backs case-insensitive search and name sorting. |
-| `revenueCents` | integer | **server** | `priceCents * unitsSold`. Backs the revenue metric. |
+| `unitsSold` | integer (0 to 10,000,000) | **server** | Running total of this product's sales. Starts at 0. |
+| `revenueCents` | integer | **server** | Running total of this product's sales, each at the price it sold for. Not `priceCents * unitsSold`. |
 | `createdAt` | Timestamp | **server** | Application clock (ms precision), so the API can return stored values without a second read. |
 | `updatedAt` | Timestamp | **server** | |
 | `createdBy`, `updatedBy` | string (uid) | **server** | Audit trail. |
 
-"Set by server" fields are derived in one place (`lib/products/repository.ts`) and the API schema is `strict`, so a client sending `revenueCents` or `createdBy` gets a 400.
+"Set by server" fields are derived in one place (`lib/products/repository.ts`) and the API schema is `strict`, so a client sending `unitsSold`, `revenueCents` or `createdBy` gets a 400.
 
-**Denormalisation trade-off.** `nameLower` and `revenueCents` are copies that must change whenever `name`, `priceCents` or `unitsSold` change. Updates therefore run in a **transaction** (read, recompute, write). The price of this is that nothing may write to `products` except the repository. The payoff is that search, name sorting and the revenue metric need no full-collection reads.
+**Denormalisation trade-off.** `nameLower` is a copy of `name`, and `unitsSold` / `revenueCents` are totals of the product's `sales`. Recording a sale writes the sale and the new totals in one **transaction**, so concurrent sales cannot overwrite each other and the totals always equal the sum of the sales. The price of this is that nothing may write to `products` or `sales` except the repository. The payoff is that search, name sorting and the per-product totals need no extra reads.
+
+## `sales/{saleId}`
+
+One document per recorded sale, written only by `recordSale()` (`POST /api/products/{id}/sales`). Sales are never edited.
+
+| Field | Type | Notes |
+|---|---|---|
+| `productId` | string | The product that sold. Not a subcollection, so the sale survives the product being hard-deleted. |
+| `quantity` | integer (1 to 10,000,000) | Positive only. |
+| `unitPriceCents` | integer | The product's `priceCents` **at the time of sale**. |
+| `amountCents` | integer | `quantity * unitPriceCents`. Backs the revenue metric. |
+| `createdAt` | Timestamp | |
+| `createdBy` | string (uid) | |
+
+**Why sales are recorded separately.** Storing revenue as `priceCents * unitsSold` would restate history: raising a price would raise the revenue of every unit already sold, and deleting a product would remove its revenue. Capturing the price on each sale makes a price edit apply to future sales only, and summing revenue from `sales` keeps the sales of deleted products.
+
+**Refunds are not supported yet.** A refund must reverse a specific sale at the price it was sold for, so it needs a "void sale" operation that writes a negative entry referencing the original. Subtracting units at today's price would make revenue wrong, which is why `quantity` must be positive.
 
 ### Where users live
 
@@ -41,13 +101,13 @@ Every list request becomes one query (`lib/products/queryPlan.ts`): optional equ
 | No filters, sorted by `createdAt`, `priceCents` or `nameLower` (either direction) | None: Firestore's automatic single-field indexes. |
 | Name search (prefix range on `nameLower`) with no other filter | None: single-field. |
 | Any combination of `category` / `status` filters, with any sort and direction, with or without search | One of **18 composite indexes**: (filters...) + (sort field, direction). |
-| Metrics (`count`, `sum(revenueCents)`, `average(priceCents)`, `count where status == active`) | Served from existing single-field indexes. |
+| Metrics (`count`, `average(priceCents)`, `count where status == active` on `products`; `sum(amountCents)` on `sales`) | Served from existing single-field indexes. |
 
 The 18 = 3 filter combinations (`category`, `status`, both) x 3 sort fields x 2 directions.
 
 **How we keep indexes honest.** `firestore.indexes.json` is **generated** from the same code that builds queries (`npm run indexes:generate`). A test enumerates every filter, sort, direction and search combination the API accepts and fails if one has no matching index, and another test fails if the committed file is out of date. This matters because **the Firebase emulator does not enforce indexes**: a missing index would pass every local test and fail in production with `FAILED_PRECONDITION`.
 
-**Indexes we turned off.** `description`, `unitsSold`, `updatedAt`, `createdBy` and `updatedBy` are never filtered or sorted on, so their automatic single-field indexes are disabled (`fieldOverrides`). That removes five index writes from every product write and keeps the 1,000-character description out of an index. Re-enable one in `UNINDEXED_FIELDS` if a query ever needs it. `priceCents` and `revenueCents` stay indexed because `sum()` and `average()` are computed from indexes.
+**Indexes we turned off.** On `products`, `description`, `unitsSold`, `revenueCents`, `updatedAt`, `createdBy` and `updatedBy` are never filtered, sorted or aggregated on; on `sales`, neither are `quantity`, `unitPriceCents` and `createdBy`. Their automatic single-field indexes are disabled (`fieldOverrides`). That removes six index writes from every product write and keeps the 1,000-character description out of an index. Re-enable one in `UNINDEXED_FIELDS` if a query ever needs it. `products.priceCents` and `sales.amountCents` stay indexed because `average()` and `sum()` are computed from indexes. `sales.productId` and `sales.createdAt` stay indexed for a future per-product sales history.
 
 Deploy rules and indexes with:
 
@@ -89,7 +149,7 @@ The alternative, a top-level `products` collection with an `orgId` field, is sim
 | Pressure | What happens | What to do |
 |---|---|---|
 | **List reads** | Already bounded: pages are `limit + 1` reads whatever the collection size. | Nothing at 10x. |
-| **Metrics** | Aggregations are billed per 1,000 index entries scanned, so cost and latency grow linearly with the collection. Fine to roughly 10^5 to 10^6 documents. | Maintain a `stats/{orgId}` document updated in the same transaction as each write (or a sharded counter if one document becomes a write hotspot, since a single document sustains about 1 write per second), and cache the result for a few seconds. |
+| **Metrics** | Aggregations are billed per 1,000 index entries scanned, so cost and latency grow linearly with the collection. `sales` grows much faster than `products`, so the revenue sum hits this first. Fine to roughly 10^5 to 10^6 documents. | Maintain a `stats/{orgId}` document updated in the same transaction as each write (or a sharded counter if one document becomes a write hotspot, since a single document sustains about 1 write per second), and cache the result for a few seconds. |
 | **Search** | Prefix-only. | Sync to a search service (Typesense, Algolia, or Elasticsearch) from a Firestore trigger, and keep Firestore as the source of truth. |
 | **Write cost** | Every write updates the document plus its index entries. | Already trimmed with `fieldOverrides`. Audit unused composite indexes before adding more. |
 | **Hotspots** | `createdAt` is monotonically increasing, which concentrates index writes on one key range at sustained high write rates (hundreds per second). | Not a concern for this workload. If it becomes one, bucket by time prefix or use a non-sequential sort key. |

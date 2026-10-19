@@ -58,13 +58,18 @@ export interface IndexDefinition {
  * Firestore indexes every field automatically, and each index is extra work on
  * every write plus storage. These fields are never filtered or sorted on, so their
  * automatic indexes are switched off. Re-enable one here if a query ever needs it.
- * (priceCents, revenueCents, status, category and the sort fields stay indexed:
- * queries and sum()/average() aggregations depend on them.)
+ * (priceCents, status, category, the sort fields and sales.amountCents stay
+ * indexed: queries and sum()/average() aggregations depend on them.)
  */
-export const UNINDEXED_FIELDS = ["description", "unitsSold", "updatedAt", "createdBy", "updatedBy"] as const;
+export const UNINDEXED_FIELDS = {
+  products: ["description", "unitsSold", "revenueCents", "updatedAt", "createdBy", "updatedBy"],
+  sales: ["quantity", "unitPriceCents", "createdBy"],
+} as const;
 
 export function fieldOverrides() {
-  return UNINDEXED_FIELDS.map((fieldPath) => ({ collectionGroup: "products", fieldPath, indexes: [] }));
+  return Object.entries(UNINDEXED_FIELDS).flatMap(([collectionGroup, fields]) =>
+    fields.map((fieldPath) => ({ collectionGroup, fieldPath, indexes: [] })),
+  );
 }
 
 const EQUALITY_COMBINATIONS: EqualityField[][] = [

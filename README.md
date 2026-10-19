@@ -9,11 +9,11 @@ A small product management dashboard built with **Next.js 16, Firebase Auth and 
 **What is in the box**
 
 - Firebase email/password sign-up and sign-in, exchanged for an httpOnly session cookie; two roles, enforced on the server.
-- Product create, read, update, delete (Firestore, via a data access layer behind Next.js API routes).
+- Product create, read, update, delete (Firestore, via a data access layer behind Next.js API routes), plus recording sales, each at the price it sold for.
 - Dashboard: four metrics, filter by status and category, sortable columns, search by name, cursor-based "Load more", responsive layout, accessible markup.
 - Admin-only Users page to promote or demote people, which also revokes their sessions.
 - **Bonus: AI-generated product descriptions** (Gemini, with a mock fallback), with notes on productionising it safely.
-- 116 automated tests: unit, emulator integration, and end-to-end over HTTP.
+- 127 automated tests: unit, emulator integration, and end-to-end over HTTP.
 
 Everything runs **locally against the Firebase emulators, with no Firebase project, no API keys and no secrets.**
 
@@ -31,7 +31,7 @@ cp .env.example .env.local     # defaults already point at the local emulators
 npm run emulators
 
 # terminal 2
-npm run seed                   # 2 demo users + 60 demo products
+npm run seed                   # 2 demo users + 60 demo bakery products
 npm run dev                    # http://localhost:3000
 ```
 
@@ -42,7 +42,7 @@ Sign in with:
 | `admin@example.com` | `Passw0rd!demo` | admin: full access |
 | `viewer@example.com` | `Passw0rd!demo` | viewer: read-only |
 
-Or create your own account on the sign-up form. New accounts are viewers; promote them from **Users** while signed in as admin.
+Or create your own account on the sign-up form. You must verify the email before you can sign in: the Auth emulator does not send real mail, it prints the verification link in terminal 1. New accounts are viewers; promote them from **Users** while signed in as admin.
 
 If `java` is not on your path on macOS: `brew install openjdk` (or point `JAVA_HOME` at any JDK, for example the one bundled with Android Studio).
 
@@ -52,7 +52,7 @@ If `java` is not on your path on macOS: `brew install openjdk` (or point `JAVA_H
 |---|---|
 | `npm test` | 83 unit tests, no services needed. |
 | `npm run test:integration` | 13 tests of the real data layer against a throwaway emulator. Starts and stops the emulators itself. |
-| `npm run test:e2e` | 20 HTTP tests of auth and roles. Needs the emulators, the seed and `npm run dev` running. |
+| `npm run test:e2e` | 21 HTTP tests of auth and roles. Needs the emulators, the seed and `npm run dev` running. |
 | `npm run lint` / `npm run typecheck` / `npm run build` | Static checks and a production build. |
 | `npm run set-role -- you@example.com admin` | Set a role from the command line (how the **first** admin is made). |
 | `npm run indexes:generate` | Regenerate `firestore.indexes.json` from the query code. |
@@ -116,7 +116,7 @@ flowchart LR
 
 Decisions I would defend in a walkthrough:
 
-- **One data access layer, no Firestore in components or routes.** Derived fields (`nameLower`, `revenueCents`) are computed in exactly one place, so they cannot go stale.
+- **One data access layer, no Firestore in components or routes.** Derived fields (`nameLower`, and the `unitsSold` / `revenueCents` sales totals) are computed in exactly one place, so they cannot go stale.
 - **Next.js API routes rather than a separate service.** One deployable and one language is the right size for this scope. The repository boundary means the data layer could be lifted into its own service without touching the UI.
 - **Shared zod schema and one permission map.** The form and the API validate with the same rules, and the UI and the server answer "can this role do that?" with the same function.
 - **`route()` wrapper instead of per-route boilerplate.** A new endpoint cannot forget the CSRF check, the auth check or error mapping, because it does not write them.
@@ -145,19 +145,24 @@ docs/DATABASE.md  full schema, index and scaling write-up
 
 ## 3. Database schema
 
-One Firestore collection, `products`. Users and roles live in Firebase Auth as a custom claim.
+Two Firestore collections, `products` and `sales`. Users and roles live in Firebase Auth as a custom claim.
+
+`products/{id}`:
 
 | Field | Type | Set by |
 |---|---|---|
 | `name`, `category`, `status`, `description` | string / enum | client |
-| `priceCents`, `unitsSold` | integer (cents, never floats) | client |
-| `nameLower`, `revenueCents` | string, integer (denormalised) | server |
+| `priceCents` | integer (cents, never floats) | client |
+| `nameLower` | string (denormalised) | server |
+| `unitsSold`, `revenueCents` | integer (running totals of the product's sales) | server |
 | `createdAt`, `updatedAt`, `createdBy`, `updatedBy` | Timestamp, uid | server |
+
+`sales/{id}`: `productId`, `quantity`, `unitPriceCents` (the price **at the time of sale**), `amountCents`, `createdAt`, `createdBy`. All set by the server; sales are never edited.
 
 Highlights (the full write-up is in **[docs/DATABASE.md](docs/DATABASE.md)**):
 
-- **Indexes:** 18 composite indexes cover every filter, sort and search combination the UI offers. The file is **generated from the query code and checked by tests**, because the emulator does not enforce indexes and a gap would only appear in production. Five never-queried fields have their automatic indexes turned off to cut write cost.
-- **Metrics use Firestore aggregation queries** (`count`, `sum`, `average`), so the dashboard never reads the whole collection. A denormalised `revenueCents` makes the sum possible.
+- **Indexes:** 18 composite indexes cover every filter, sort and search combination the UI offers. The file is **generated from the query code and checked by tests**, because the emulator does not enforce indexes and a gap would only appear in production. Never-queried fields have their automatic indexes turned off to cut write cost.
+- **Metrics use Firestore aggregation queries** (`count`, `sum`, `average`), so the dashboard never reads the whole collection. Revenue is `sum(amountCents)` over `sales`, so a price change never restates past revenue and a deleted product's sales still count.
 - **Pagination is cursor-based** (`startAfter(value, id)`): constant cost per page at any depth, stable with ties.
 - **Multi-tenancy:** nest under `orgs/{orgId}/products`, take `orgId` from the verified session, keep rules deny-all.
 - **10x:** list reads are already bounded; the first things to change are metrics (maintained counters) and search (an external index). Both are spelled out with triggers in the doc.
@@ -170,10 +175,10 @@ Highlights (the full write-up is in **[docs/DATABASE.md](docs/DATABASE.md)**):
 
 1. The browser signs in with the Firebase SDK (email + password). The SDK is configured with **in-memory persistence**, so no token is left in `localStorage` or IndexedDB where XSS could read it.
 2. The browser sends the short-lived ID token **once, in a POST body** (never a URL) to `POST /api/auth/session`.
-3. The server verifies it with the Admin SDK (`checkRevoked: true`), requires that the sign-in happened in the **last 5 minutes** (Firebase's guidance for minting a session), and creates a **session cookie**.
+3. The server verifies it with the Admin SDK (`checkRevoked: true`), requires that the sign-in happened in the **last 5 minutes** (Firebase's guidance for minting a session), requires a **verified email address**, and creates a **session cookie**. Sign-up is open, so without the verification check anyone could register someone else's address (for example the CEO's) and look trustworthy on the Users page. Sign-up sends the verification link; signing in unverified re-sends it.
 4. The cookie is **`HttpOnly`** (JavaScript cannot read it), **`Secure`** in production, **`SameSite=Lax`**, scoped to `/`, expiring in 5 days. The browser then discards its Firebase session.
 5. On every request the server verifies the cookie with `checkRevoked: true`. Forged, expired, revoked and disabled-user cookies are all rejected.
-6. Sign-out clears the cookie. A 401 from the API sends the browser to `/login` with a full page load, which also discards cached data.
+6. Sign-out **revokes the session in Firebase** (`revokeRefreshTokens`) and then clears the cookie, so a copied cookie stops working too. Firebase revokes per user, so this signs the user out on every device. A 401 from the API sends the browser to `/login` with a full page load, which also discards cached data.
 
 ### Roles
 
@@ -191,7 +196,7 @@ Highlights (the full write-up is in **[docs/DATABASE.md](docs/DATABASE.md)**):
 | `proxy.ts` | Session cookie *exists* | Fast redirect for signed-out visitors. **Not a security boundary**: a forged cookie passes it. |
 | Server Components | `requireUser()` verifies the cookie with Firebase; the Users page also checks `can(role, "user:manage")` | Pages are protected, and non-admins never receive the Users page. |
 | `route()` wrapper | Origin check, verified session, role check | Every API call. Role checks are declared per route (`permission: "product:write"`) and enforced before the handler runs. |
-| Zod, `strictObject` | Reject unknown fields, bad types, out-of-range values | Clients cannot set `createdBy`, `revenueCents`, ids, or negative prices. |
+| Zod, `strictObject` | Reject unknown fields, bad types, out-of-range values | Clients cannot set `createdBy`, `unitsSold`, `revenueCents`, a sale's price, ids, or negative prices. |
 | `firestore.rules` | `allow read, write: if false` | Even a leaked web API key cannot touch data; only the server (Admin SDK) can. |
 
 ### OWASP-style checklist
@@ -199,7 +204,7 @@ Highlights (the full write-up is in **[docs/DATABASE.md](docs/DATABASE.md)**):
 | Concern | What the code does |
 |---|---|
 | Sensitive data in URLs | ID token travels in a POST body; the session is a cookie. Pagination cursors are the only opaque values in URLs and grant nothing. |
-| Session handling | httpOnly, Secure (prod), SameSite=Lax, 5-day expiry, server-side revocation. |
+| Session handling | httpOnly, Secure (prod), SameSite=Lax, 5-day expiry, verified email required, server-side revocation on sign-out and on role change. |
 | CSRF | SameSite=Lax **plus** an Origin check on every non-GET request (missing or foreign Origin gives 403). |
 | Injection | zod validation everywhere; Firestore queries are built from validated enums and typed values, never from strings. The route id is validated to be alphanumeric before it reaches Firestore. |
 | Broken access control | Server-enforced roles, tested over real HTTP including "viewer tries every write", "viewer calls admin endpoints" and "old session after role change". |
@@ -207,7 +212,7 @@ Highlights (the full write-up is in **[docs/DATABASE.md](docs/DATABASE.md)**):
 | Security headers | `X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, `Strict-Transport-Security`. |
 | Secrets | Server keys live only in environment variables; `.env*` is git-ignored except `.env.example`, which holds emulator-only values. The Gemini key never reaches the browser. |
 
-**Not done, deliberately listed:** a strict Content-Security-Policy (needs per-request nonces with Next), rate limiting on sign-in (Firebase has its own throttling), email verification, MFA, and App Check. See [What's next](#8-whats-next).
+**Not done, deliberately listed:** a strict Content-Security-Policy (needs per-request nonces with Next), rate limiting on sign-in (Firebase has its own throttling), MFA, and App Check. See [What's next](#8-whats-next).
 
 ---
 
@@ -244,9 +249,9 @@ I could not call the real Gemini API in development (no key), so `GeminiProvider
 
 | Suite | Count | Covers |
 |---|---|---|
-| Unit (`npm test`) | 83 | Role parsing and permissions; zod schemas (defaults, strictness, bounds); cents parsing; cursor round-trip and tampering; query plan and index consistency; AI sanitiser, prompt and rate limiter; CSRF origin check. |
-| Integration (`npm run test:integration`) | 13 | The real repository on the Firestore emulator: CRUD, derived fields, paging through ties in every sort and direction, filters, search, malformed cursors, aggregation metrics. |
-| End-to-end (`npm run test:e2e`) | 20 | The running app over HTTP: 401 without a session, forged cookies, cookie flags, default role for new sign-ups, **viewer is refused every write and admin endpoint**, admin CRUD, validation, cursor paging, CSRF rejection, AI endpoint and rate limit, **session revoked after a role change**, signed-out redirects, security headers. |
+| Unit (`npm test`) | 88 | Role parsing and permissions; zod schemas (defaults, strictness, bounds); cents parsing; cursor round-trip and tampering; query plan and index consistency; AI sanitiser, prompt and rate limiter; CSRF origin check. |
+| Integration (`npm run test:integration`) | 18 | The real repository on the Firestore emulator: CRUD, derived fields, sales at the price of the moment, concurrent sales, paging through ties in every sort and direction, filters, search, malformed cursors, aggregation metrics including deleted products' revenue. |
+| End-to-end (`npm run test:e2e`) | 21 | The running app over HTTP: 401 without a session, forged cookies, cookie flags, unverified emails refused, default role for new sign-ups, **session revoked on sign-out**, **viewer is refused every write and admin endpoint**, admin CRUD, validation, cursor paging, CSRF rejection, AI endpoint and rate limit, **session revoked after a role change**, signed-out redirects, security headers. |
 
 Two things I did to trust the tests: I deliberately broke `parseRole` and then the `product:write` permission on one route, and confirmed the relevant tests failed. I also exercised the UI in a browser as both roles (sign-in errors, create, delete, search, AI draft, responsive checks at 375 px and 1024 px).
 
@@ -262,8 +267,8 @@ Two things I did to trust the tests: I deliberately broke `parseRole` and then t
 | Role in custom claims, no `users` collection | One source of truth. | Listing users uses the Auth API (capped at 100 here); no queryable profile data. |
 | `checkRevoked` on every request | Role changes and disabled accounts take effect immediately. | One extra Auth lookup per request. A role cache would trade immediacy for speed. |
 | Session cookie, not storing ID tokens in the browser | XSS cannot steal the session. | Needs a server round-trip to sign in. |
-| Price as integer cents; `unitsSold` field | Exact arithmetic; gives "revenue" a defined meaning. | The brief did not ask for `unitsSold`, so this is my interpretation of "revenue total". |
-| Denormalised `nameLower` and `revenueCents` | Search, name sort and revenue metric without full reads. | Must only be written through the repository. |
+| Price as integer cents; a `sales` collection | Exact arithmetic; "revenue" is the sum of real sales at the price each sold for, so price edits and deletes never restate it. | The brief did not ask for sales, so this is my interpretation of "revenue total". No refunds yet: those need a "void sale" that reverses a specific sale. |
+| Denormalised `nameLower`, `unitsSold`, `revenueCents` | Search, name sort and per-product totals without extra reads. | Must only be written through the repository, in the same transaction as the sale. |
 | Prefix search, not full-text | Native Firestore, no extra service. | "pro" does not match "Aurora Analytics Pro"; search forces name sort. |
 | Fixed category list in code | Simple filters, no distinct-query problem (Firestore has none). | Changing categories is a code change. |
 | Hard delete | Simple. | No undo or history. `inactive` status covers "hide it". |
@@ -281,7 +286,7 @@ If I had another week, in this order:
 
 1. **Run it against a real Firebase project and deploy** (Vercel or Firebase App Hosting). This is the biggest unverified area, especially that the generated indexes are accepted and sufficient.
 2. **CI**: GitHub Actions running lint, typecheck, unit tests, and integration tests (emulators) on every push, plus the e2e suite against a built app.
-3. **Security hardening**: email verification before a session is issued, a nonce-based Content-Security-Policy, sign-in rate limiting and App Check, MFA for admins, and an audit log (who changed which product or role).
+3. **Security hardening**: a nonce-based Content-Security-Policy, sign-in rate limiting and App Check, MFA for admins, and an audit log (who changed which product or role).
 4. **Production AI**: shared rate limits and spend cap, usage telemetry, evaluation set, moderation settings (see section 5).
 5. **Multi-tenancy** as sketched in `docs/DATABASE.md`.
 6. **Search**: sync to Typesense or Algolia for real full-text search, removing the "search forces name sort" restriction.

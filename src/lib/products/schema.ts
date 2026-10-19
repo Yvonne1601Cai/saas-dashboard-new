@@ -4,10 +4,11 @@
 import { z } from "zod";
 
 export const PRODUCT_CATEGORIES = [
-  "Software",
-  "Hardware",
-  "Services",
-  "Subscriptions",
+  "Bread",
+  "Pastries",
+  "Cakes",
+  "Cookies",
+  "Drinks",
   "Other",
 ] as const;
 export const PRODUCT_STATUSES = ["active", "inactive"] as const;
@@ -18,8 +19,8 @@ export type ProductStatus = (typeof PRODUCT_STATUSES)[number];
 export type SortKey = (typeof SORT_KEYS)[number];
 export type SortDirection = "asc" | "desc";
 
-// Upper bounds keep price * unitsSold (stored as revenueCents) far below 2^53,
-// so the per-document revenue is always an exact integer.
+// Every unit sells at most at MAX_PRICE_CENTS and a product's unitsSold is capped,
+// so a product's revenueCents stays far below 2^53 and is always an exact integer.
 export const MAX_PRICE_CENTS = 10_000_000; // $100,000.00
 export const MAX_UNITS_SOLD = 10_000_000;
 export const MAX_NAME_LENGTH = 120;
@@ -33,15 +34,14 @@ const fields = {
   category: z.enum(PRODUCT_CATEGORIES),
   priceCents: z.number().int().min(0).max(MAX_PRICE_CENTS),
   status: z.enum(PRODUCT_STATUSES),
-  unitsSold: z.number().int().min(0).max(MAX_UNITS_SOLD),
   description: z.string().trim().max(MAX_DESCRIPTION_LENGTH),
 };
 
 // strictObject: unknown keys are rejected, so a client cannot smuggle in
 // server-controlled fields such as createdBy, revenueCents or nameLower.
+// unitsSold and revenueCents only change by recording a sale.
 export const productCreateSchema = z.strictObject({
   ...fields,
-  unitsSold: fields.unitsSold.default(0),
   description: fields.description.default(""),
 });
 
@@ -64,9 +64,16 @@ export const productListQuerySchema = z.object({
   cursor: z.string().max(600).optional(),
 });
 
+// Positive only: a refund must reverse a specific sale at the price it was sold
+// for, not subtract units at today's price.
+export const saleCreateSchema = z.strictObject({
+  quantity: z.number().int().min(1).max(MAX_UNITS_SOLD),
+});
+
 export type ProductCreateInput = z.infer<typeof productCreateSchema>;
 export type ProductUpdateInput = z.infer<typeof productUpdateSchema>;
 export type ProductListParams = z.infer<typeof productListQuerySchema>;
+export type SaleCreateInput = z.infer<typeof saleCreateSchema>;
 
 /** What the API returns. Internal fields (nameLower, createdBy, ...) are not exposed. */
 export interface Product {
@@ -80,6 +87,16 @@ export interface Product {
   description: string;
   createdAt: string; // ISO 8601
   updatedAt: string;
+}
+
+/** One recorded sale. The price is captured at the time of sale, so later price edits never change it. */
+export interface Sale {
+  id: string;
+  productId: string;
+  quantity: number;
+  unitPriceCents: number;
+  amountCents: number;
+  createdAt: string; // ISO 8601
 }
 
 export interface ProductPage {

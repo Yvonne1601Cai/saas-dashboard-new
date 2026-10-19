@@ -10,6 +10,7 @@ import type {
   ProductPage,
   ProductStatus,
   ProductUpdateInput,
+  Sale,
   SortDirection,
   SortKey,
 } from "@/lib/products/schema";
@@ -71,6 +72,15 @@ export function useUpdateProduct() {
   return useMutation({
     mutationFn: ({ id, patch }: { id: string; patch: ProductUpdateInput }) =>
       api<Product>(`/api/products/${id}`, { method: "PATCH", body: patch }),
+    onSuccess: invalidate,
+  });
+}
+
+export function useRecordSale() {
+  const invalidate = useInvalidateProducts();
+  return useMutation({
+    mutationFn: ({ id, quantity }: { id: string; quantity: number }) =>
+      api<{ sale: Sale; product: Product }>(`/api/products/${id}/sales`, { method: "POST", body: { quantity } }),
     onSuccess: invalidate,
   });
 }

@@ -12,18 +12,17 @@ import {
   type Product,
 } from "@/lib/products/schema";
 import { Modal } from "./Modal";
-import { Button, Field, inputClass } from "./ui";
+import { Button, Field, inputClass, selectClass } from "./ui";
 
 interface FormState {
   name: string;
   category: string;
   price: string; // dollars, as typed
   status: string;
-  unitsSold: string;
   description: string;
 }
 
-const EMPTY: FormState = { name: "", category: "Software", price: "", status: "active", unitsSold: "0", description: "" };
+const EMPTY: FormState = { name: "", category: "Bread", price: "", status: "active", description: "" };
 
 function fromProduct(p: Product): FormState {
   return {
@@ -31,7 +30,6 @@ function fromProduct(p: Product): FormState {
     category: p.category,
     price: centsToDollarString(p.priceCents),
     status: p.status,
-    unitsSold: String(p.unitsSold),
     description: p.description,
   };
 }
@@ -46,15 +44,12 @@ function validate(form: FormState) {
   const errors: Errors = {};
   const priceCents = dollarsToCents(form.price);
   if (priceCents === null) errors.price = "Enter an amount like 19.99";
-  const unitsSold = /^\d+$/.test(form.unitsSold.trim()) ? Number(form.unitsSold) : null;
-  if (unitsSold === null) errors.unitsSold = "Enter a whole number, 0 or more";
 
   const parsed = productCreateSchema.safeParse({
     name: form.name,
     category: form.category,
     priceCents: priceCents ?? 0,
     status: form.status,
-    unitsSold: unitsSold ?? 0,
     description: form.description,
   });
   if (!parsed.success) {
@@ -151,7 +146,7 @@ export function ProductDialog({ product, onClose }: { product: Product | null; o
         <div className="grid grid-cols-2 gap-4">
           <Field id={`${uid}-category`} label="Category" error={errors.category}>
             {(aria) => (
-              <select {...aria} value={form.category} onChange={set("category")} className={inputClass}>
+              <select {...aria} value={form.category} onChange={set("category")} className={selectClass}>
                 {PRODUCT_CATEGORIES.map((c) => (
                   <option key={c}>{c}</option>
                 ))}
@@ -160,7 +155,7 @@ export function ProductDialog({ product, onClose }: { product: Product | null; o
           </Field>
           <Field id={`${uid}-status`} label="Status" error={errors.status}>
             {(aria) => (
-              <select {...aria} value={form.status} onChange={set("status")} className={inputClass}>
+              <select {...aria} value={form.status} onChange={set("status")} className={selectClass}>
                 {PRODUCT_STATUSES.map((s) => (
                   <option key={s} value={s}>
                     {s[0].toUpperCase() + s.slice(1)}
@@ -169,14 +164,14 @@ export function ProductDialog({ product, onClose }: { product: Product | null; o
               </select>
             )}
           </Field>
-          <Field id={`${uid}-price`} label="Price (USD)" error={errors.price}>
+          <Field
+            id={`${uid}-price`}
+            label="Price (USD)"
+            error={errors.price}
+            hint={isEdit ? "Applies to future sales only" : undefined}
+          >
             {(aria) => (
               <input {...aria} value={form.price} onChange={set("price")} inputMode="decimal" placeholder="19.99" className={inputClass} />
-            )}
-          </Field>
-          <Field id={`${uid}-units`} label="Units sold" error={errors.unitsSold}>
-            {(aria) => (
-              <input {...aria} value={form.unitsSold} onChange={set("unitsSold")} inputMode="numeric" className={inputClass} />
             )}
           </Field>
         </div>
@@ -199,12 +194,13 @@ export function ProductDialog({ product, onClose }: { product: Product | null; o
               />
             )}
           </Field>
-          <div className="mt-2 flex items-center gap-3">
-            <Button variant="secondary" onClick={generateDescription} disabled={aiPending || saving}>
+          <div className="mt-2 flex items-start gap-3">
+            {/* shrink-0: a long note must wrap itself, never squeeze the button label onto two lines. */}
+            <Button variant="secondary" className="shrink-0" onClick={generateDescription} disabled={aiPending || saving}>
               {aiPending ? "Generating…" : "Generate with AI"}
             </Button>
             {/* Live region: the result or failure is announced without moving focus. */}
-            <p role="status" className="text-sm text-slate-600">
+            <p role="status" className="min-w-0 pt-2 text-sm text-slate-600">
               {aiNote}
             </p>
           </div>

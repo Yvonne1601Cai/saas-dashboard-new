@@ -3,17 +3,18 @@ import {
   productCreateSchema,
   productListQuerySchema,
   productUpdateSchema,
+  saleCreateSchema,
 } from "../src/lib/products/schema.ts";
 
-const valid = { name: "Widget", category: "Hardware", priceCents: 1999, status: "active" };
+const valid = { name: "Baguette", category: "Cakes", priceCents: 1999, status: "active" };
 
 describe("productCreateSchema", () => {
   it("accepts a valid product and applies defaults", () => {
-    expect(productCreateSchema.parse(valid)).toEqual({ ...valid, unitsSold: 0, description: "" });
+    expect(productCreateSchema.parse(valid)).toEqual({ ...valid, description: "" });
   });
 
   it("trims the name", () => {
-    expect(productCreateSchema.parse({ ...valid, name: "  Widget  " }).name).toBe("Widget");
+    expect(productCreateSchema.parse({ ...valid, name: "  Baguette  " }).name).toBe("Baguette");
   });
 
   it.each([
@@ -24,15 +25,30 @@ describe("productCreateSchema", () => {
     ["fractional cents", { priceCents: 10.5 }],
     ["price above the cap", { priceCents: 10_000_001 }],
     ["string price", { priceCents: "100" }],
-    ["negative units", { unitsSold: -1 }],
   ])("rejects %s", (_label, override) => {
     expect(productCreateSchema.safeParse({ ...valid, ...override }).success).toBe(false);
   });
 
   it("rejects server-controlled fields, so clients cannot set them", () => {
-    for (const extra of [{ createdBy: "x" }, { revenueCents: 1 }, { nameLower: "x" }, { id: "x" }]) {
+    for (const extra of [{ createdBy: "x" }, { revenueCents: 1 }, { unitsSold: 1 }, { nameLower: "x" }, { id: "x" }]) {
       expect(productCreateSchema.safeParse({ ...valid, ...extra }).success).toBe(false);
     }
+  });
+});
+
+describe("saleCreateSchema", () => {
+  it("accepts a positive whole quantity", () => {
+    expect(saleCreateSchema.parse({ quantity: 3 })).toEqual({ quantity: 3 });
+  });
+
+  it.each([
+    ["zero", { quantity: 0 }],
+    ["negative (refunds are not subtractions at today's price)", { quantity: -1 }],
+    ["fractional", { quantity: 1.5 }],
+    ["above the cap", { quantity: 10_000_001 }],
+    ["a client-chosen price", { quantity: 1, unitPriceCents: 1 }],
+  ])("rejects %s", (_label, body) => {
+    expect(saleCreateSchema.safeParse(body).success).toBe(false);
   });
 });
 
@@ -45,6 +61,7 @@ describe("productUpdateSchema", () => {
   it("rejects an empty patch and unknown fields", () => {
     expect(productUpdateSchema.safeParse({}).success).toBe(false);
     expect(productUpdateSchema.safeParse({ createdBy: "x" }).success).toBe(false);
+    expect(productUpdateSchema.safeParse({ unitsSold: 10 }).success).toBe(false);
   });
 });
 

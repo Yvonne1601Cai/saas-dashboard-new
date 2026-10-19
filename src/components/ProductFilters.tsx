@@ -2,7 +2,7 @@
 
 import type { ProductFilters as Filters } from "@/hooks/useProducts";
 import { PRODUCT_CATEGORIES, PRODUCT_STATUSES } from "@/lib/products/schema";
-import { Field, inputClass } from "./ui";
+import { Field, inputClass, selectClass } from "./ui";
 
 export function ProductFilters({ filters, onChange }: { filters: Filters; onChange: (next: Filters) => void }) {
   return (
@@ -30,7 +30,7 @@ export function ProductFilters({ filters, onChange }: { filters: Filters; onChan
             {...aria}
             value={filters.status}
             onChange={(e) => onChange({ ...filters, status: e.target.value as Filters["status"] })}
-            className={inputClass}
+            className={selectClass}
           >
             <option value="">All statuses</option>
             {PRODUCT_STATUSES.map((s) => (
@@ -47,7 +47,7 @@ export function ProductFilters({ filters, onChange }: { filters: Filters; onChan
             {...aria}
             value={filters.category}
             onChange={(e) => onChange({ ...filters, category: e.target.value as Filters["category"] })}
-            className={inputClass}
+            className={selectClass}
           >
             <option value="">All categories</option>
             {PRODUCT_CATEGORIES.map((c) => (

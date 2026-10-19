@@ -18,7 +18,7 @@ export function Button({
   return (
     <button
       type={type}
-      className={`inline-flex items-center justify-center gap-2 rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
+      className={`inline-flex items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 py-2 text-sm font-medium focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-600 disabled:cursor-not-allowed ${variants[variant]} ${className}`}
       {...props}
     />
   );
@@ -26,6 +26,9 @@ export function Button({
 
 export const inputClass =
   "block w-full rounded-md border-0 bg-white px-3 py-2 text-sm text-slate-900 ring-1 ring-inset ring-slate-300 placeholder:text-slate-400 focus:ring-2 focus:ring-inset focus:ring-indigo-600 aria-[invalid=true]:ring-red-500";
+
+/** Same look as inputClass, with a custom dropdown arrow (see .select-control in globals.css). */
+export const selectClass = `${inputClass} select-control`;
 
 /** Label + control + error wiring in one place, so every field is announced correctly. */
 export function Field({

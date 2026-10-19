@@ -13,7 +13,7 @@ export function MetricCards() {
       value: data?.activeProducts.toLocaleString("en-US"),
       sub: data && data.totalProducts > 0 ? `${Math.round((data.activeProducts / data.totalProducts) * 100)}% of catalogue` : undefined,
     },
-    { label: "Revenue (price × units sold)", value: data && formatCents(data.revenueCents) },
+    { label: "Revenue (recorded sales)", value: data && formatCents(data.revenueCents) },
     {
       label: "Average price",
       value: data && (data.averagePriceCents === null ? "n/a" : formatCents(data.averagePriceCents)),

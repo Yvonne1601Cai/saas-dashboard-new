@@ -16,8 +16,8 @@ describe("planListQuery", () => {
   });
 
   it("orders equality filters deterministically", () => {
-    expect(plan({ status: "active", category: "Hardware" }).equality).toEqual([
-      { field: "category", value: "Hardware" },
+    expect(plan({ status: "active", category: "Cakes" }).equality).toEqual([
+      { field: "category", value: "Cakes" },
       { field: "status", value: "active" },
     ]);
   });
@@ -36,7 +36,7 @@ describe("indexes", () => {
   it("every filtered query the API allows has a matching composite index", () => {
     const have = new Set(requiredIndexes().map((i) => JSON.stringify(i.fields)));
     const statuses = [undefined, "active", "inactive"];
-    const categories = [undefined, "Software", "Other"];
+    const categories = [undefined, "Bread", "Other"];
     for (const status of statuses) {
       for (const category of categories) {
         for (const sort of ["createdAt", "price", "name"]) {
@@ -73,8 +73,11 @@ describe("indexes", () => {
 
 describe("unindexed fields", () => {
   it("never switches off an index that a query or aggregation depends on", () => {
-    const needed = ["status", "category", "createdAt", "priceCents", "nameLower", "revenueCents"];
-    const off = fieldOverrides().map((o) => o.fieldPath);
+    const needed = [
+      ...["status", "category", "createdAt", "priceCents", "nameLower"].map((f) => `products.${f}`),
+      "sales.amountCents",
+    ];
+    const off = fieldOverrides().map((o) => `${o.collectionGroup}.${o.fieldPath}`);
     for (const field of needed) expect(off).not.toContain(field);
   });
 });

@@ -8,16 +8,36 @@ const BASE = process.env.E2E_BASE_URL ?? "http://localhost:3000";
 const AUTH_EMULATOR = `http://${process.env.FIREBASE_AUTH_EMULATOR_HOST}`;
 const PASSWORD = "Passw0rd!demo";
 
-async function idTokenFor(email: string, password = PASSWORD, signUp = false) {
-  const endpoint = signUp ? "accounts:signUp" : "accounts:signInWithPassword";
+async function identityToolkit(endpoint: string, payload: object) {
   const res = await fetch(`${AUTH_EMULATOR}/identitytoolkit.googleapis.com/v1/${endpoint}?key=demo-api-key`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ email, password, returnSecureToken: true }),
+    body: JSON.stringify(payload),
   });
   const body = await res.json();
-  if (!res.ok) throw new Error(`emulator sign-in failed: ${JSON.stringify(body)}`);
+  if (!res.ok) throw new Error(`emulator ${endpoint} failed: ${JSON.stringify(body)}`);
+  return body;
+}
+
+async function idTokenFor(email: string, password = PASSWORD, signUp = false) {
+  const endpoint = signUp ? "accounts:signUp" : "accounts:signInWithPassword";
+  const body = await identityToolkit(endpoint, { email, password, returnSecureToken: true });
   return body.idToken as string;
+}
+
+const newEmail = () => `new-${Date.now()}-${Math.random().toString(36).slice(2, 8)}@example.com`;
+
+/** Signs up a new account and verifies its email the way a user would: via the emailed link. */
+async function signUpVerified(): Promise<string> {
+  const email = newEmail();
+  const idToken = await idTokenFor(email, PASSWORD, true);
+  await identityToolkit("accounts:sendOobCode", { requestType: "VERIFY_EMAIL", idToken });
+  const res = await fetch(`${AUTH_EMULATOR}/emulator/v1/projects/${process.env.FIREBASE_PROJECT_ID}/oobCodes`);
+  const { oobCodes } = (await res.json()) as { oobCodes: Array<{ email: string; oobCode: string; requestType: string }> };
+  const code = oobCodes.filter((c) => c.email === email && c.requestType === "VERIFY_EMAIL").at(-1);
+  if (!code) throw new Error(`no verification code for ${email}`);
+  await identityToolkit("accounts:update", { oobCode: code.oobCode });
+  return email;
 }
 
 async function login(email: string, opts: { signUp?: boolean } = {}) {
@@ -59,7 +79,7 @@ async function call(path: string, { method = "GET", cookie, body, origin = BASE,
   return { status: res.status, json: json as any, text, headers: res.headers }; // eslint-disable-line @typescript-eslint/no-explicit-any
 }
 
-const validProduct = { name: "E2E Widget", category: "Hardware", priceCents: 2500, status: "active", unitsSold: 4 };
+const validProduct = { name: "E2E Baguette", category: "Cakes", priceCents: 2500, status: "active" };
 
 let admin: string;
 let viewer: string;
@@ -99,16 +119,32 @@ describe("authentication", () => {
     expect(body.user).toMatchObject({ email: "viewer@example.com", role: "viewer" });
   });
 
-  it("gives a brand-new sign-up the least-privileged role", async () => {
-    const email = `new-${Date.now()}@example.com`;
-    const { body } = await login(email, { signUp: true });
+  it("refuses a session until the email address is verified", async () => {
+    const { res, setCookie } = await login(newEmail(), { signUp: true });
+    expect(res.status).toBe(403);
+    expect(setCookie).toBeUndefined();
+  });
+
+  it("gives a brand-new verified sign-up the least-privileged role", async () => {
+    const { body } = await login(await signUpVerified());
     expect(body.user.role).toBe("viewer");
   });
 
-  it("clears the cookie on sign-out", async () => {
-    const res = await fetch(`${BASE}/api/auth/session`, { method: "DELETE", headers: { origin: BASE, cookie: viewer } });
+  it("revokes the session on sign-out, not just the cookie", async () => {
+    // A throwaway user: revocation signs out every device, so the shared demo sessions must not be used.
+    const email = await signUpVerified();
+    const session = await login(email);
+    expect((await call("/api/products?limit=1", { cookie: session.cookie })).status).toBe(200);
+    // Firebase revocation has 1-second granularity, so wait out the sign-in second first.
+    await new Promise((r) => setTimeout(r, 1100));
+
+    const res = await fetch(`${BASE}/api/auth/session`, { method: "DELETE", headers: { origin: BASE, cookie: session.cookie } });
     expect(res.status).toBe(204);
     expect(res.headers.getSetCookie().join()).toMatch(/__session=;/);
+    // A copy of the old cookie no longer works...
+    expect((await call("/api/products?limit=1", { cookie: session.cookie })).status, "old session must be revoked").toBe(401);
+    // ...but signing in again does.
+    expect((await login(email)).res.status).toBe(200);
   });
 });
 
@@ -126,6 +162,7 @@ describe("viewer role is read-only, enforced by the server", () => {
     expect((await call("/api/products", { method: "POST", cookie: viewer, body: validProduct })).status).toBe(403);
     expect((await call(`/api/products/${id}`, { method: "PATCH", cookie: viewer, body: { name: "hacked" } })).status).toBe(403);
     expect((await call(`/api/products/${id}`, { method: "DELETE", cookie: viewer })).status).toBe(403);
+    expect((await call(`/api/products/${id}/sales`, { method: "POST", cookie: viewer, body: { quantity: 1 } })).status).toBe(403);
     // ...and nothing changed:
     expect((await call(`/api/products/${id}`, { cookie: viewer })).json.name).not.toBe("hacked");
   });
@@ -144,21 +181,30 @@ describe("viewer role is read-only, enforced by the server", () => {
 });
 
 describe("admin", () => {
-  it("runs a full create, read, update, delete cycle", async () => {
+  it("runs a full create, read, sell, update, delete cycle", async () => {
     const created = await call("/api/products", { method: "POST", cookie: admin, body: validProduct });
     expect(created.status).toBe(201);
-    expect(created.json).toMatchObject({ name: "E2E Widget", revenueCents: 10_000 });
+    expect(created.json).toMatchObject({ name: "E2E Baguette", unitsSold: 0, revenueCents: 0 });
     const id = created.json.id;
 
-    expect((await call(`/api/products/${id}`, { cookie: viewer })).json.name).toBe("E2E Widget");
+    expect((await call(`/api/products/${id}`, { cookie: viewer })).json.name).toBe("E2E Baguette");
 
-    const patched = await call(`/api/products/${id}`, { method: "PATCH", cookie: admin, body: { unitsSold: 10 } });
+    const sold = await call(`/api/products/${id}/sales`, { method: "POST", cookie: admin, body: { quantity: 4 } });
+    expect(sold.status).toBe(201);
+    expect(sold.json.sale).toMatchObject({ quantity: 4, unitPriceCents: 2500, amountCents: 10_000 });
+    expect(sold.json.product).toMatchObject({ unitsSold: 4, revenueCents: 10_000 });
+
+    // A price change applies to future sales only.
+    const patched = await call(`/api/products/${id}`, { method: "PATCH", cookie: admin, body: { priceCents: 9900 } });
     expect(patched.status).toBe(200);
-    expect(patched.json.revenueCents).toBe(25_000);
+    expect(patched.json).toMatchObject({ priceCents: 9900, revenueCents: 10_000 });
+    expect((await call(`/api/products/${id}`, { method: "PATCH", cookie: admin, body: { unitsSold: 10 } })).status).toBe(400);
+    expect((await call(`/api/products/${id}/sales`, { method: "POST", cookie: admin, body: { quantity: 0 } })).status).toBe(400);
 
     expect((await call(`/api/products/${id}`, { method: "DELETE", cookie: admin })).status).toBe(204);
     expect((await call(`/api/products/${id}`, { cookie: admin })).status).toBe(404);
     expect((await call(`/api/products/${id}`, { method: "DELETE", cookie: admin })).status).toBe(404);
+    expect((await call(`/api/products/${id}/sales`, { method: "POST", cookie: admin, body: { quantity: 1 } })).status).toBe(404);
   });
 
   it("validates input and never leaks internals", async () => {
@@ -207,13 +253,13 @@ describe("admin", () => {
     const ok = await call("/api/ai/description", {
       method: "POST",
       cookie: admin,
-      body: { name: "Acme CRM", category: "Software", priceCents: 4900 },
+      body: { name: "Sourdough Loaf", category: "Bread", priceCents: 4900 },
     });
     expect(ok.status).toBe(200);
-    expect(ok.json.description).toContain("Acme CRM");
+    expect(ok.json.description).toContain("Sourdough Loaf");
     expect(ok.json.provider).toMatch(/mock|gemini/);
 
-    const bad = await call("/api/ai/description", { method: "POST", cookie: admin, body: { name: "", category: "Software", priceCents: 1 } });
+    const bad = await call("/api/ai/description", { method: "POST", cookie: admin, body: { name: "", category: "Bread", priceCents: 1 } });
     expect(bad.status).toBe(400);
   });
 

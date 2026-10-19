@@ -30,6 +30,11 @@ export async function createSession(idToken: string) {
   if (Date.now() / 1000 - decoded.auth_time > MAX_SIGN_IN_AGE_SECONDS) {
     throw new ApiError("unauthorized", "Please sign in again");
   }
+  // Sign-up is open, so without this anyone could register someone else's address
+  // (say, the CEO's), read the catalogue, and look trustworthy on the Users page.
+  if (!decoded.email_verified) {
+    throw new ApiError("forbidden", "Verify your email address before signing in. Check your inbox for the link.");
+  }
   const cookie = await adminAuth.createSessionCookie(idToken, {
     expiresIn: SESSION_MAX_AGE_SECONDS * 1000,
   });
@@ -37,6 +42,21 @@ export async function createSession(idToken: string) {
     cookie,
     user: { uid: decoded.uid, email: decoded.email ?? "", role: parseRole(decoded.role) },
   };
+}
+
+/**
+ * Ends the session on the server, not just in the browser. Revoking the user's
+ * refresh tokens makes verifySession (checkRevoked) reject this cookie even if a
+ * copy of it survives. Firebase revokes per user, so this signs out every device.
+ */
+export async function endSession(cookie: string): Promise<void> {
+  let uid: string;
+  try {
+    uid = (await adminAuth.verifySessionCookie(cookie)).uid;
+  } catch {
+    return; // expired or forged: there is no session to end
+  }
+  await adminAuth.revokeRefreshTokens(uid);
 }
 
 /** Returns the session user, or null for a missing, expired, forged or revoked cookie. */

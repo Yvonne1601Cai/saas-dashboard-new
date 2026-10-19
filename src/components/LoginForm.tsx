@@ -1,7 +1,13 @@
 "use client";
 
 import { FirebaseError } from "firebase/app";
-import { createUserWithEmailAndPassword, signInWithEmailAndPassword, signOut } from "firebase/auth";
+import {
+  createUserWithEmailAndPassword,
+  sendEmailVerification,
+  signInWithEmailAndPassword,
+  signOut,
+  type User,
+} from "firebase/auth";
 import { useRouter } from "next/navigation";
 import { useState, type FormEvent } from "react";
 import { api, ApiClientError } from "@/lib/api/client";
@@ -35,28 +41,51 @@ function messageFor(error: unknown): string {
   return "Something went wrong. Please try again.";
 }
 
+/** Best effort: Firebase throttles repeated sends, and the message tells the user what to do either way. */
+async function sendVerification(user: User) {
+  await sendEmailVerification(user).catch(() => {});
+}
+
 export function LoginForm({ showDemoHint }: { showDemoHint: boolean }) {
   const router = useRouter();
   const [mode, setMode] = useState<Mode>("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
 
   async function onSubmit(event: FormEvent) {
     event.preventDefault();
     setError(null);
+    setNotice(null);
     if (mode === "signup" && password.length < 8) {
       setError("Choose a password of at least 8 characters.");
       return;
     }
     setPending(true);
     const auth = getClientAuth();
+    const address = email.trim();
     try {
-      const credential =
-        mode === "signin"
-          ? await signInWithEmailAndPassword(auth, email.trim(), password)
-          : await createUserWithEmailAndPassword(auth, email.trim(), password);
+      if (mode === "signup") {
+        const credential = await createUserWithEmailAndPassword(auth, address, password);
+        await sendVerification(credential.user);
+        setMode("signin");
+        setPassword("");
+        setNotice(`We sent a verification link to ${address}. Open it, then sign in.`);
+        setPending(false);
+        return;
+      }
+
+      const credential = await signInWithEmailAndPassword(auth, address, password);
+      // The server refuses unverified emails; checking here first just lets us
+      // say why and resend the link, instead of showing a bare error.
+      if (!credential.user.emailVerified) {
+        await sendVerification(credential.user);
+        setNotice(`Your email is not verified yet. We sent a new link to ${address}. Open it, then sign in again.`);
+        setPending(false);
+        return;
+      }
 
       // Hand the short-lived ID token to our server (POST body, never a URL). The
       // server verifies it and replies with an httpOnly session cookie.
@@ -97,7 +126,11 @@ export function LoginForm({ showDemoHint }: { showDemoHint: boolean }) {
       <Field
         id="password"
         label="Password"
-        hint={isSignUp ? "At least 8 characters. New accounts start as viewers; an admin can change your role." : undefined}
+        hint={
+          isSignUp
+            ? "At least 8 characters. You will need to verify your email. New accounts start as viewers; an admin can change your role."
+            : undefined
+        }
       >
         {(aria) => (
           <input
@@ -116,6 +149,11 @@ export function LoginForm({ showDemoHint }: { showDemoHint: boolean }) {
       <div role="alert" className="min-h-5 text-sm text-red-600">
         {error}
       </div>
+      {notice && (
+        <p role="status" className="rounded-md bg-indigo-50 p-3 text-sm text-indigo-800">
+          {notice}
+        </p>
+      )}
 
       <Button type="submit" className="w-full" disabled={pending || !email || !password}>
         {pending ? "Please wait…" : isSignUp ? "Create account" : "Sign in"}
@@ -129,6 +167,7 @@ export function LoginForm({ showDemoHint }: { showDemoHint: boolean }) {
           onClick={() => {
             setMode(isSignUp ? "signin" : "signup");
             setError(null);
+            setNotice(null);
           }}
         >
           {isSignUp ? "Sign in" : "Create an account"}
@@ -143,6 +182,7 @@ export function LoginForm({ showDemoHint }: { showDemoHint: boolean }) {
           <p>
             Password for both: <code>Passw0rd!demo</code>
           </p>
+          <p className="mt-1">New sign-ups: the Auth emulator prints the verification link in its terminal.</p>
         </div>
       )}
     </form>

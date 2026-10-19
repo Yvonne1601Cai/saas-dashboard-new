@@ -1,7 +1,8 @@
 import { cookies } from "next/headers";
 import { z } from "zod";
 import { json, readJson, route } from "@/lib/api/handler";
-import { SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, createSession } from "@/lib/auth/session";
+import { SESSION_COOKIE, SESSION_MAX_AGE_SECONDS, createSession, endSession } from "@/lib/auth/session";
+import { log } from "@/lib/logger";
 
 const bodySchema = z.strictObject({ idToken: z.string().min(20).max(4096) });
 
@@ -20,8 +21,22 @@ export const POST = route({ public: true }, async ({ req }) => {
   return json({ user });
 });
 
-/** Sign out: clear the cookie. */
-export const DELETE = route({ public: true }, async () => {
-  (await cookies()).set(SESSION_COOKIE, "", { ...cookieBase, maxAge: 0 });
+/** Sign out: revoke the session in Firebase, then clear the cookie. */
+export const DELETE = route({ public: true }, async ({ requestId }) => {
+  const jar = await cookies();
+  const session = jar.get(SESSION_COOKIE)?.value;
+  if (session) {
+    try {
+      await endSession(session);
+    } catch (error) {
+      // Still clear the cookie below so the browser is signed out; the failed
+      // revocation is logged because the cookie would stay valid until it expires.
+      log("error", "session revocation failed", {
+        requestId,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  jar.set(SESSION_COOKIE, "", { ...cookieBase, maxAge: 0 });
   return new Response(null, { status: 204 });
 });
